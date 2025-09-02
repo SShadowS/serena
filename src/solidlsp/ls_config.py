@@ -39,6 +39,7 @@ class Language(str, Enum):
     DART = "dart"
     CPP = "cpp"
     PHP = "php"
+    R = "r"
     CLOJURE = "clojure"
     ELIXIR = "elixir"
     TERRAFORM = "terraform"
@@ -110,6 +111,8 @@ class Language(str, Enum):
                 return FilenameMatcher("*.dart")
             case self.PHP:
                 return FilenameMatcher("*.php")
+            case self.R:
+                return FilenameMatcher("*.R", "*.r", "*.Rmd", "*.Rnw")
             case self.CLOJURE:
                 return FilenameMatcher("*.clj", "*.cljs", "*.cljc", "*.edn")  # codespell:ignore edn
             case self.ELIXIR:
