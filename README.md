@@ -3,6 +3,8 @@
   <img src="resources/serena-logo-dark-mode.svg#gh-dark-mode-only" style="width:500px">
 </p>
 
+> **🔧 Fork Notice:** This fork includes full **AL (Microsoft Dynamics 365 Business Central)** language server support, extending Serena's capabilities to AL development. See [AL Language Support](#al-language-support) for details.
+
 * :rocket: Serena is a powerful **coding agent toolkit** capable of turning an LLM into a fully-featured agent that works **directly on your codebase**.
   Unlike most other tools, it is not tied to an LLM, framework or an interface, making it easy to use it in a variety of ways.
 * :wrench: Serena provides essential **semantic code retrieval and editing tools** that are akin to an IDE's capabilities, extracting code entities at the symbol level and exploiting relational structure. When combined with an existing coding agent, these tools greatly enhance (token) efficiency.
@@ -116,9 +118,28 @@ With Serena, we provide direct, out-of-the-box support for:
   * Nix (requires nixd installation)
   * Elixir (requires installation of NextLS and Elixir; **Windows not supported**)
   * Erlang (requires installation of beam and [erlang_ls](https://github.com/erlang-ls/erlang_ls), experimental, might be slow or hang)
+  * **AL** (Microsoft Dynamics 365 Business Central - requires AL extension from VS Code or set `AL_EXTENSION_PATH`)
 
 Support for further languages can easily be added by providing a shallow adapter for a new language server implementation,
 see Serena's [memory on that](.serena/memories/adding_new_language_support_guide.md).
+
+#### AL Language Support
+
+This fork adds comprehensive AL language server integration for Microsoft Dynamics 365 Business Central development:
+
+- **Full LSP support** via Microsoft's official AL extension
+- **Custom AL commands** including `al/gotodefinition` and `al/setActiveWorkspace`
+- **Automatic VS Code extension discovery** - finds AL extension in common locations
+- **Symbol navigation and editing** for all AL code structures (tables, codeunits, pages, enums, interfaces, etc.)
+- **Project loading and workspace management** with proper app.json handling
+- **Comprehensive test coverage** ensuring reliability
+
+**Setup Requirements:**
+1. Download the AL extension for VS Code (`ms-dynamics-smb.al`) 
+2. Either:
+   - Place the extension folder in your working directory, or
+   - Set `AL_EXTENSION_PATH` environment variable to the extension location, or
+   - Have it installed in VS Code (auto-detected)
 
 ## Table of Contents
 
