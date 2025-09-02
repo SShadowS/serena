@@ -234,3 +234,6 @@ tmp/
 # Swift
 /test/resources/repos/swift/test_repo/.build
 /test/resources/repos/swift/test_repo/.swiftpm
+
+# AL Language Server Extension
+ms-dynamics-smb.al-*/
