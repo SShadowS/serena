@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Self
 
+from bs4 import BeautifulSoup
 from joblib import Parallel, delayed
+
+from serena.constants import DEFAULT_SOURCE_FILE_ENCODING
 
 log = logging.getLogger(__name__)
 
@@ -236,9 +239,32 @@ def search_text(
 
 
 def default_file_reader(file_path: str) -> str:
-    """Reads using utf-8 encoding."""
-    with open(file_path, encoding="utf-8") as f:
+    """Reads using the default encoding."""
+    with open(file_path, encoding=DEFAULT_SOURCE_FILE_ENCODING) as f:
         return f.read()
+
+
+def expand_braces(pattern: str) -> list[str]:
+    """
+    Expands brace patterns in a glob string.
+    For example, "**/*.{js,jsx,ts,tsx}" becomes ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"].
+    Handles multiple brace sets as well.
+    """
+    patterns = [pattern]
+    while any("{" in p for p in patterns):
+        new_patterns = []
+        for p in patterns:
+            match = re.search(r"\{([^{}]+)\}", p)
+            if match:
+                prefix = p[: match.start()]
+                suffix = p[match.end() :]
+                options = match.group(1).split(",")
+                for option in options:
+                    new_patterns.append(f"{prefix}{option}{suffix}")
+            else:
+                new_patterns.append(p)
+        patterns = new_patterns
+    return patterns
 
 
 def glob_match(pattern: str, path: str) -> bool:
@@ -250,6 +276,13 @@ def glob_match(pattern: str, path: str) -> bool:
     - ** matches any number of directories (zero or more)
     - ? matches a single character except /
     - [seq] matches any character in seq
+
+    Supports brace expansion:
+    - {a,b,c} expands to multiple patterns (including nesting)
+
+    Unsupported patterns:
+    - Bash extended glob features are unavailable in Python's fnmatch
+    - Extended globs like !(), ?(), +(), *(), @() are not supported
 
     :param pattern: Glob pattern (e.g., 'src/**/*.py', '**agent.py')
     :param path: File path to match against
@@ -313,14 +346,21 @@ def search_files(
     """
     # Pre-filter paths (done sequentially to avoid overhead)
     # Use proper glob matching instead of gitignore patterns
+    include_patterns = expand_braces(paths_include_glob) if paths_include_glob else None
+    exclude_patterns = expand_braces(paths_exclude_glob) if paths_exclude_glob else None
+
     filtered_paths = []
     for path in relative_file_paths:
-        if paths_include_glob and not glob_match(paths_include_glob, path):
-            log.debug(f"Skipping {path}: does not match include pattern {paths_include_glob}")
-            continue
-        if paths_exclude_glob and glob_match(paths_exclude_glob, path):
-            log.debug(f"Skipping {path}: matches exclude pattern {paths_exclude_glob}")
-            continue
+        if include_patterns:
+            if not any(glob_match(p, path) for p in include_patterns):
+                log.debug(f"Skipping {path}: does not match include pattern {paths_include_glob}")
+                continue
+
+        if exclude_patterns:
+            if any(glob_match(p, path) for p in exclude_patterns):
+                log.debug(f"Skipping {path}: matches exclude pattern {paths_exclude_glob}")
+                continue
+
         filtered_paths.append(path)
 
     log.info(f"Processing {len(filtered_paths)} files.")
@@ -366,3 +406,21 @@ def search_files(
 
     log.info(f"Found {len(matches)} total matches across {len(filtered_paths)} files")
     return matches
+
+
+def render_html(html: str) -> str:
+    """
+    Remove HTML tags and decode HTML entities from text while preserving the actual content.
+    This keeps type information and structure but removes all formatting.
+
+    :param html: HTML text to clean
+    :return: Plain text without HTML tags and with decoded entities
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    # join text with spaces to avoid concatenation of words
+    text = soup.get_text(separator=" ", strip=True)
+
+    # normalize non-breaking spaces
+    text = text.replace("\xa0", " ")
+
+    return text.strip()
