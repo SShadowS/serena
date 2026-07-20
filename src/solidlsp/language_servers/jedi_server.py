@@ -3,15 +3,12 @@ Provides Python specific instantiation of the LanguageServer class. Contains var
 """
 
 import logging
-import os
-import pathlib
-from typing import cast
+import threading
 
 from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
@@ -39,18 +36,12 @@ class JediServer(SolidLanguageServer):
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in ["venv", "__pycache__"]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Jedi Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
-            "processId": os.getpid(),
-            "clientInfo": {"name": "Serena", "version": "0.1.0"},
             "locale": "en",
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
             # Note: this is not necessarily the minimal set of capabilities...
             "capabilities": {
                 "workspace": {
@@ -142,19 +133,14 @@ class JediServer(SolidLanguageServer):
                 },
             },
             "trace": "verbose",
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return cast(InitializeParams, initialize_params)
+        return initialize_params
 
     def _start_server(self) -> None:
         """
         Starts the JEDI Language Server
         """
+        completions_available = threading.Event()
 
         def execute_client_command_handler(params: dict) -> list:
             return []
@@ -164,7 +150,7 @@ class JediServer(SolidLanguageServer):
 
         def check_experimental_status(params: dict) -> None:
             if params["quiescent"] == True:
-                self.completions_available.set()
+                completions_available.set()
 
         def window_log_message(msg: dict) -> None:
             log.info(f"LSP: window/logMessage: {msg}")
@@ -180,7 +166,7 @@ class JediServer(SolidLanguageServer):
 
         log.info("Starting jedi-language-server server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)

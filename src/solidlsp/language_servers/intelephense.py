@@ -4,7 +4,6 @@ Provides PHP specific instantiation of the LanguageServer class using Intelephen
 
 import logging
 import os
-import pathlib
 import shutil
 from time import sleep
 
@@ -13,13 +12,19 @@ from overrides import override
 from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_utils import PlatformId, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import Definition, DefinitionParams, InitializeParams, LocationLink
+from solidlsp.lsp_protocol_handler.lsp_types import Definition, DefinitionParams, LocationLink
 from solidlsp.settings import SolidLSPSettings
 
 from ..lsp_protocol_handler import lsp_types
-from .common import RuntimeDependency, RuntimeDependencyCollection
+from .common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 
 log = logging.getLogger(__name__)
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_INTELEPHENSE_VERSION = "1.14.4"
+DEFAULT_INTELEPHENSE_VERSION = "1.14.4"
 
 
 class Intelephense(SolidLanguageServer):
@@ -59,9 +64,12 @@ class Intelephense(SolidLanguageServer):
             assert is_node_installed, "node is not installed or isn't in PATH. Please install NodeJS and try again."
             is_npm_installed = shutil.which("npm") is not None
             assert is_npm_installed, "npm is not installed or isn't in PATH. Please install npm and try again."
+            intelephense_version = self._custom_settings.get("intelephense_version", DEFAULT_INTELEPHENSE_VERSION)
+            npm_registry = self._custom_settings.get("npm_registry")
 
-            # Install intelephense if not already installed
-            intelephense_ls_dir = os.path.join(self._ls_resources_dir, "php-lsp")
+            # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+            ls_dirname = "php-lsp" if intelephense_version == INITIAL_INTELEPHENSE_VERSION else f"php-lsp-{intelephense_version}"
+            intelephense_ls_dir = os.path.join(self._ls_resources_dir, ls_dirname)
             os.makedirs(intelephense_ls_dir, exist_ok=True)
             intelephense_executable_path = os.path.join(intelephense_ls_dir, "node_modules", ".bin", "intelephense")
             if not os.path.exists(intelephense_executable_path):
@@ -69,16 +77,16 @@ class Intelephense(SolidLanguageServer):
                     [
                         RuntimeDependency(
                             id="intelephense",
-                            command="npm install --prefix ./ intelephense@1.14.4",
+                            command=build_npm_install_command("intelephense", intelephense_version, npm_registry),
                             platform_id="any",
                         )
                     ]
                 )
                 deps.install(intelephense_ls_dir)
 
-            assert os.path.exists(
-                intelephense_executable_path
-            ), f"intelephense executable not found at {intelephense_executable_path}, something went wrong."
+            assert os.path.exists(intelephense_executable_path), (
+                f"intelephense executable not found at {intelephense_executable_path}, something went wrong."
+            )
 
             return intelephense_executable_path
 
@@ -101,29 +109,30 @@ class Intelephense(SolidLanguageServer):
     def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
         return self.DependencyProvider(self._custom_settings, self._ls_resources_dir)
 
-    def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialization params for the Intelephense Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
                 "textDocument": {
                     "synchronization": {"didSave": True, "dynamicRegistration": True},
                     "definition": {"dynamicRegistration": True},
+                    "references": {"dynamicRegistration": True},
+                    "documentSymbol": {
+                        "dynamicRegistration": True,
+                        "hierarchicalDocumentSymbolSupport": True,
+                        "symbolKind": {"valueSet": list(range(1, 27))},
+                    },
+                    "hover": {"dynamicRegistration": True, "contentFormat": ["markdown", "plaintext"]},
                 },
-                "workspace": {"workspaceFolders": True, "didChangeConfiguration": {"dynamicRegistration": True}},
+                "workspace": {
+                    "workspaceFolders": True,
+                    "didChangeConfiguration": {"dynamicRegistration": True},
+                    "symbol": {"dynamicRegistration": True},
+                },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
         initialization_options = {}
         # Add license key if provided via environment variable
@@ -139,7 +148,7 @@ class Intelephense(SolidLanguageServer):
             initialization_options["intelephense.files.maxSize"] = max_file_size
 
         initialize_params["initializationOptions"] = initialization_options
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start Intelephense server process"""
@@ -160,19 +169,20 @@ class Intelephense(SolidLanguageServer):
 
         log.info("Starting Intelephense server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
         log.info("After sent initialize params")
 
         # Verify server capabilities
-        assert "textDocumentSync" in init_response["capabilities"]
-        assert "completionProvider" in init_response["capabilities"]
-        assert "definitionProvider" in init_response["capabilities"]
+        capabilities = init_response["capabilities"]
+        assert "textDocumentSync" in capabilities
+        assert "completionProvider" in capabilities
+        assert "definitionProvider" in capabilities
+        assert "documentSymbolProvider" in capabilities, "Server must support document symbols"
 
         self.server.notify.initialized({})
-        self.completions_available.set()
 
         # Intelephense server is typically ready immediately after initialization
         # TODO: This is probably incorrect; the server does send an initialized notification, which we could wait for!

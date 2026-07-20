@@ -1,16 +1,15 @@
 import logging
 import os
-import pathlib
 import subprocess
-import threading
 import time
+from collections.abc import Hashable
 
 from overrides import override
 
 from solidlsp import ls_types
-from solidlsp.ls import SolidLanguageServer
+from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
+from solidlsp.ls_types import SymbolKind
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
@@ -53,18 +52,31 @@ class SourceKitLSP(SolidLanguageServer):
         super().__init__(
             config, repository_root_path, ProcessLaunchInfo(cmd="sourcekit-lsp", cwd=repository_root_path), "swift", solidlsp_settings
         )
-        self.server_ready = threading.Event()
         self.request_id = 0
         self._did_sleep_before_requesting_references = False
         self._initialization_timestamp: float | None = None
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    @override
+    def _document_symbols_cache_fingerprint(self) -> Hashable:
+        normalize_symbol_name_version = 1
+        return normalize_symbol_name_version
+
+    @override
+    def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
+        original_name = symbol["name"]
+
+        if symbol.get("kind") not in (SymbolKind.Function, SymbolKind.Method, SymbolKind.Constructor):
+            return original_name
+
+        if "(" not in original_name:
+            return original_name
+
+        return original_name.split("(", 1)[0].strip()
+
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Swift Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-
         initialize_params = {
             "capabilities": {
                 "general": {
@@ -278,7 +290,6 @@ class SourceKitLSP(SolidLanguageServer):
                     "workspaceFolders": True,
                 },
             },
-            "clientInfo": {"name": "Visual Studio Code", "version": "1.102.2"},
             "initializationOptions": {
                 "backgroundIndexing": True,
                 "backgroundPreparationMode": "enabled",
@@ -288,18 +299,9 @@ class SourceKitLSP(SolidLanguageServer):
                 "workspace/peekDocuments": True,
             },
             "locale": "en",
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
 
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start sourcekit-lsp server process"""
@@ -320,7 +322,7 @@ class SourceKitLSP(SolidLanguageServer):
 
         log.info("Starting sourcekit-lsp server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -332,10 +334,6 @@ class SourceKitLSP(SolidLanguageServer):
         assert "definitionProvider" in capabilities, "definitionProvider capability missing"
 
         self.server.notify.initialized({})
-        self.completions_available.set()
-
-        self.server_ready.set()
-        self.server_ready.wait()
 
         # Mark initialization timestamp for smarter delay calculation
         self._initialization_timestamp = time.time()

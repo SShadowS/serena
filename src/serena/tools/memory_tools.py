@@ -1,90 +1,122 @@
+import logging
 from typing import Literal
 
-from serena.tools import ReplaceContentTool, Tool, ToolMarkerCanEdit
+from serena.tools import Tool, ToolMarkerCanEdit
+
+log = logging.getLogger(__name__)
 
 
 class WriteMemoryTool(Tool, ToolMarkerCanEdit):
     """
-    Writes a named memory (for future reference) to Serena's project-specific memory store.
+    Write some information (utf-8-encoded) about this project that can be useful for future tasks to a memory in md format.
+    The memory name should be meaningful.
     """
 
-    def apply(self, memory_file_name: str, content: str, max_answer_chars: int = -1) -> str:
+    def apply(self, memory_name: str, content: str, max_chars: int = -1) -> str:
         """
-        Write some information (utf-8-encoded) about this project that can be useful for future tasks to a memory in md format.
-        The memory name should be meaningful.
+        Write information about this project that can be useful for future tasks in md format.
+        The name should be meaningful and can include "/" to organize into topics.
+        If explicitly instructed, use the "global/" prefix for writing a memory that is shared across projects.
+        References to other memories should be inside backticks and prefixed with mem:,
+        e.g., `mem:auth`.
+
+        :param memory_name: memory name
+        :param content: memory content, utf8-encoded
+        :param max_chars: see other tools
         """
         # NOTE: utf-8 encoding is configured in the MemoriesManager
-        if max_answer_chars == -1:
-            max_answer_chars = self.agent.serena_config.default_max_tool_answer_chars
-        if len(content) > max_answer_chars:
+        if max_chars == -1:
+            max_chars = self.agent.serena_config.default_max_tool_answer_chars
+        if len(content) > max_chars:
             raise ValueError(
-                f"Content for {memory_file_name} is too long. Max length is {max_answer_chars} characters. "
-                + "Please make the content shorter."
+                f"Content for {memory_name} is too long. Max length is {max_chars} characters. " + "Please make the content shorter."
             )
 
-        return self.memories_manager.save_memory(memory_file_name, content)
+        return self.memory_manager.save_memory(memory_name, content, is_tool_context=True)
 
 
 class ReadMemoryTool(Tool):
     """
-    Reads the memory with the given name from Serena's project-specific memory store.
+    Reads the content of a memory file.
     """
 
-    def apply(self, memory_file_name: str, max_answer_chars: int = -1) -> str:
+    def apply(self, memory_name: str) -> str:
         """
-        Read the content of a memory file. This tool should only be used if the information
-        is relevant to the current task. You can infer whether the information
-        is relevant from the memory file name.
-        You should not read the same memory file multiple times in the same conversation.
+        Use to read a memory that is likely to be relevant to the current task, inferring relevance e.g. from the name.
         """
-        return self.memories_manager.load_memory(memory_file_name)
+        return self.memory_manager.load_memory(memory_name)
 
 
 class ListMemoriesTool(Tool):
     """
-    Lists memories in Serena's project-specific memory store.
+    Lists available memories.
     """
 
-    def apply(self) -> str:
+    def apply(self, topic: str = "") -> str:
         """
-        List available memories. Any memory can be read using the `read_memory` tool.
+        Lists available memories, optionally filtered by topic.
         """
-        return self._to_json(self.memories_manager.list_memories())
+        return self._to_json(self.memory_manager.list_memories(topic).to_dict())
 
 
 class DeleteMemoryTool(Tool, ToolMarkerCanEdit):
     """
-    Deletes a memory from Serena's project-specific memory store.
+    Delete a memory file.
     """
 
-    def apply(self, memory_file_name: str) -> str:
+    def apply(self, memory_name: str) -> str:
         """
-        Delete a memory file. Should only happen if a user asks for it explicitly,
-        for example by saying that the information retrieved from a memory file is no longer correct
-        or no longer relevant for the project.
+        Delete a memory, only call if instructed explicitly or permission was granted by the user.
         """
-        return self.memories_manager.delete_memory(memory_file_name)
+        return self.memory_manager.delete_memory(memory_name, is_tool_context=True)
+
+
+class RenameMemoryTool(Tool, ToolMarkerCanEdit):
+    """
+    Renames or moves a memory, updating references that are marked with the `mem:` prefix.
+    """
+
+    def apply(self, old_name: str, new_name: str) -> str:
+        """
+        Rename or move a memory, use "/" in the name to organize into topics.
+        The "global" topic should only be used if explicitly instructed.
+        References to other memories that are marked with the `mem:` prefix will be updated accordingly.
+        References in read-only memories are not affected.
+        """
+        renaming_message, n_references_updated = self.memory_manager.rename_memory_and_propagate_references(
+            old_name, new_name, is_tool_context=True
+        )
+        if n_references_updated > 0:
+            log.info(f"Updated {n_references_updated} references to memory {old_name} to {new_name}")
+        return renaming_message
 
 
 class EditMemoryTool(Tool, ToolMarkerCanEdit):
+    """
+    Replaces content matching a regular expression in a memory.
+    """
+
     def apply(
         self,
-        memory_file_name: str,
+        memory_name: str,
         needle: str,
         repl: str,
         mode: Literal["literal", "regex"],
+        allow_multiple_occurrences: bool = False,
     ) -> str:
         r"""
-        Replaces content matching a regular expression in a memory.
+        Replace content matching a regular expression in a memory.
 
-        :param memory_file_name: the name of the memory
-        :param needle: the string or regex pattern to search for.
+        :param memory_name: the name of the memory
+        :param needle: the string or regex pattern to search for. In regex mode, be careful to not replace too much!
             If `mode` is "literal", this string will be matched exactly.
             If `mode` is "regex", this string will be treated as a regular expression (syntax of Python's `re` module,
-            with flags DOTALL and MULTILINE enabled).
+            with the MULTILINE and DOTALL flags enabled).
         :param repl: the replacement string (verbatim).
         :param mode: either "literal" or "regex", specifying how the `needle` parameter is to be interpreted.
+        :param allow_multiple_occurrences: whether to allow matching and replacing multiple occurrences.
+            If false and multiple occurrences are found, an error will be returned.
         """
-        replace_content_tool = self.agent.get_tool(ReplaceContentTool)
-        rel_path = self.memories_manager.get_memory_file_path(memory_file_name).relative_to(self.get_project_root())
-        return replace_content_tool.replace_content(str(rel_path), needle, repl, mode=mode, require_not_ignored=False)
+        return self.memory_manager.edit_memory(
+            memory_name, needle, repl, mode, allow_multiple_occurrences, is_tool_context=True, regex_multiline=True
+        )

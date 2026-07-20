@@ -6,29 +6,45 @@ which provides TypeScript language server functionality via VSCode's TypeScript 
 
 import logging
 import os
-import pathlib
 import shutil
 import threading
-from typing import cast
 
 from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_config import Language, LanguageServerConfig
 from solidlsp.ls_utils import PlatformId, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
-from .common import RuntimeDependency, RuntimeDependencyCollection
+from .common import RuntimeDependency, RuntimeDependencyCollection, build_npm_install_command
 
 log = logging.getLogger(__name__)
+
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_VTSLS_VERSION = "0.2.9"
+DEFAULT_VTSLS_VERSION = "0.2.9"
 
 
 class VtsLanguageServer(SolidLanguageServer):
     """
     Provides TypeScript specific instantiation of the LanguageServer class using vtsls.
-    Contains various configurations and settings specific to TypeScript via vtsls wrapper.
+
+    Supported entries in ``ls_specific_settings["typescript_vts"]``:
+        - ``vtsls_version``: version of ``@vtsls/language-server`` to install (default: ``"0.2.9"``).
+        - ``npm_registry``: custom npm registry for the managed install.
+        - ``initialization_options``: optional dict forwarded verbatim as LSP
+          ``initializationOptions``. Useful for Yarn PnP projects, e.g.::
+
+              initialization_options:
+                typescript:
+                  tsdk: "project/.yarn/sdks/typescript/lib"
+                vtsls:
+                  autoUseWorkspaceTsdk: true
+
+          See https://github.com/yioneko/vtsls/issues/169 for the PnP recipe.
     """
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
@@ -72,18 +88,23 @@ class VtsLanguageServer(SolidLanguageServer):
             PlatformId.WIN_arm64,
         ]
         assert platform_id in valid_platforms, f"Platform {platform_id} is not supported for vtsls at the moment"
+        vts_config = solidlsp_settings.get_ls_specific_settings(Language.TYPESCRIPT_VTS)
+        vtsls_version = vts_config.get("vtsls_version", DEFAULT_VTSLS_VERSION)
+        npm_registry = vts_config.get("npm_registry")
 
         deps = RuntimeDependencyCollection(
             [
                 RuntimeDependency(
                     id="vtsls",
                     description="vtsls language server package",
-                    command="npm install --prefix ./ @vtsls/language-server@0.2.9",
+                    command=build_npm_install_command("@vtsls/language-server", vtsls_version, npm_registry),
                     platform_id="any",
                 ),
             ]
         )
-        vts_ls_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), "vts-lsp")
+        # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+        ls_dirname = "vts-lsp" if vtsls_version == INITIAL_VTSLS_VERSION else f"vts-lsp-{vtsls_version}"
+        vts_ls_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), ls_dirname)
         vts_executable_path = os.path.join(vts_ls_dir, "vtsls")
 
         # Verify both node and npm are installed
@@ -102,14 +123,35 @@ class VtsLanguageServer(SolidLanguageServer):
         assert os.path.exists(vts_executable_path), "vtsls executable not found. Please install @vtsls/language-server and try again."
         return f"{vts_executable_path} --stdio"
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    @property
+    def _initialization_options(self) -> dict:
+        """
+        Validated user-provided ``initializationOptions``.
+
+        :raises ValueError: if ``ls_specific_settings.typescript_vts.initialization_options``
+            is set to a value that is not a dict.
+        """
+        opts = self._custom_settings.get("initialization_options")
+        if opts is None:
+            return {}
+        if not isinstance(opts, dict):
+            raise ValueError(f"ls_specific_settings.typescript_vts.initialization_options must be a dict, got {type(opts).__name__}")
+        return opts
+
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the VTS Language Server.
+
+        If ``initialization_options`` is set in ``ls_specific_settings["typescript_vts"]``,
+        it is forwarded verbatim as LSP ``initializationOptions``.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
-        initialize_params = {
+        initialize_params: dict = {
             "locale": "en",
+            "initializationOptions": {
+                "preferences": {
+                    "disableAutomaticTypingAcquisition": True,
+                },
+            },
             "capabilities": {
                 "textDocument": {
                     "synchronization": {"didSave": True, "dynamicRegistration": True},
@@ -131,17 +173,13 @@ class VtsLanguageServer(SolidLanguageServer):
                     "configuration": True,  # This might be needed for vtsls
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return cast(InitializeParams, initialize_params)
+
+        if self._initialization_options:
+            log.info("Forwarding user-provided initializationOptions to vtsls: %s", self._initialization_options)
+            initialize_params["initializationOptions"] = self._initialization_options
+
+        return initialize_params
 
     def _start_server(self) -> None:
         """
@@ -155,6 +193,7 @@ class VtsLanguageServer(SolidLanguageServer):
             await lsp.request_references(...)
             # Shutdown the LanguageServer on exit from scope
         # LanguageServer has been shutdown
+        ```
         """
 
         def register_capability_handler(params: dict) -> None:
@@ -167,12 +206,12 @@ class VtsLanguageServer(SolidLanguageServer):
         def execute_client_command_handler(params: dict) -> list:
             return []
 
-        def workspace_configuration_handler(params: dict) -> list[dict] | dict:
-            # VTS may request workspace configuration
-            # Return empty configuration for each requested item
-            if "items" in params:
-                return [{}] * len(params["items"])
-            return {}
+        init_options = self._initialization_options
+
+        def workspace_configuration_handler(params: dict) -> list[object]:
+            # vtsls pulls settings for sections like "typescript", "vtsls", "javascript".
+            # Return the matching sub-dicts from the user-provided initialization_options.
+            return [init_options.get(item.get("section", ""), {}) for item in params["items"]]
 
         def do_nothing(params: dict) -> None:
             return
@@ -186,7 +225,6 @@ class VtsLanguageServer(SolidLanguageServer):
             """
             if params.get("quiescent") is True:
                 self.server_ready.set()
-                self.completions_available.set()
 
         self.server.on_request("client/registerCapability", register_capability_handler)
         self.server.on_notification("window/logMessage", window_log_message)
@@ -198,7 +236,7 @@ class VtsLanguageServer(SolidLanguageServer):
 
         log.info("Starting VTS server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -216,13 +254,20 @@ class VtsLanguageServer(SolidLanguageServer):
         log.debug(f"completionProvider: {init_response['capabilities']['completionProvider']}")
 
         self.server.notify.initialized({})
+
+        # vtsls also reads settings via workspace/didChangeConfiguration (in addition
+        # to initializationOptions and workspace/configuration pulls). Push the same
+        # user-provided settings on all three channels for maximum compatibility,
+        # e.g. so that `typescript.tsdk` is honoured for Yarn PnP projects.
+        if init_options:
+            self.server.notify.workspace_did_change_configuration({"settings": init_options})
+
         if self.server_ready.wait(timeout=1.0):
             log.info("VTS server is ready")
         else:
             log.info("Timeout waiting for VTS server to become ready, proceeding anyway")
             # Fallback: assume server is ready after timeout
             self.server_ready.set()
-        self.completions_available.set()
 
     @override
     def _get_wait_time_for_cross_file_referencing(self) -> float:

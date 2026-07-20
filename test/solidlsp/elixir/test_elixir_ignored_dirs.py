@@ -6,12 +6,10 @@ import pytest
 
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
-from test.conftest import start_ls_context
-
-from . import EXPERT_UNAVAILABLE, EXPERT_UNAVAILABLE_REASON
+from test.conftest import language_tests_enabled, start_ls_context
 
 # These marks will be applied to all tests in this module
-pytestmark = [pytest.mark.elixir, pytest.mark.skipif(EXPERT_UNAVAILABLE, reason=f"Expert not available: {EXPERT_UNAVAILABLE_REASON}")]
+pytestmark = [pytest.mark.elixir, pytest.mark.skipif(not language_tests_enabled(Language.ELIXIR), reason="Elixir tests are disabled")]
 
 # Skip slow tests in CI - they require multiple Expert instances which is too slow
 IN_CI = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
@@ -92,7 +90,6 @@ def test_refs_and_symbols_with_glob_patterns(repo_path: Path) -> None:
     """
     ignored_paths = ["*cripts", "ignored_*"]  # codespell:ignore cripts
     with start_ls_context(language=Language.ELIXIR, repo_path=str(repo_path), ignored_paths=ignored_paths) as ls:
-
         # Same as in the above tests
         root = ls.request_full_symbol_tree()[0]
         root_children = root["children"]

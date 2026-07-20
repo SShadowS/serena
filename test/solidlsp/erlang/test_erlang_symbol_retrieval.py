@@ -14,13 +14,12 @@ import pytest
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_types import SymbolKind
-
-from . import ERLANG_LS_UNAVAILABLE, ERLANG_LS_UNAVAILABLE_REASON
+from test.conftest import language_tests_enabled
 
 # These marks will be applied to all tests in this module
 pytestmark = [
     pytest.mark.erlang,
-    pytest.mark.skipif(ERLANG_LS_UNAVAILABLE, reason=f"Erlang LS not available: {ERLANG_LS_UNAVAILABLE_REASON}"),
+    pytest.mark.skipif(not language_tests_enabled(Language.ERLANG), reason="Erlang tests are disabled"),
 ]
 
 
@@ -52,7 +51,7 @@ class TestErlangLanguageServerSymbols:
             assert "create_user" in containing_symbol["name"]
             assert containing_symbol["kind"] == SymbolKind.Method or containing_symbol["kind"] == SymbolKind.Function
             if "body" in containing_symbol:
-                assert "create_user" in containing_symbol["body"]
+                assert "create_user" in containing_symbol["body"].get_text()
 
     @pytest.mark.parametrize("language_server", [Language.ERLANG], indirect=True)
     def test_request_containing_symbol_module(self, language_server: SolidLanguageServer) -> None:
@@ -308,8 +307,7 @@ class TestErlangLanguageServerSymbols:
 
     @pytest.mark.timeout(60)  # Add 60 second timeout
     @pytest.mark.xfail(
-        reason="Known intermittent timeout issue in Erlang LS in CI environments. "
-        "May pass locally but can timeout on slower CI systems.",
+        reason="Known intermittent timeout issue in Erlang LS in CI environments. May pass locally but can timeout on slower CI systems.",
         strict=False,
     )
     @pytest.mark.parametrize("language_server", [Language.ERLANG], indirect=True)

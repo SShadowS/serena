@@ -3,22 +3,25 @@ Fortran Language Server implementation using fortls.
 """
 
 import logging
-import os
-import pathlib
 import re
-import shutil
-import threading
 
 from overrides import override
 
 from solidlsp import ls_types
-from solidlsp.ls import DocumentSymbols, LSPFileBuffer, SolidLanguageServer
+from solidlsp.ls import (
+    DocumentSymbols,
+    LanguageServerDependencyProvider,
+    LanguageServerDependencyProviderUvx,
+    LSPConstants,
+    LSPFileBuffer,
+    SolidLanguageServer,
+)
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
-from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+FORTLS_VERSION = "3.2.2"
 
 
 class FortranLanguageServer(SolidLanguageServer):
@@ -171,31 +174,21 @@ class FortranLanguageServer(SolidLanguageServer):
 
         return DocumentSymbols(fixed_root_symbols)
 
-    @staticmethod
-    def _check_fortls_installation() -> str:
-        """Check if fortls is available."""
-        fortls_path = shutil.which("fortls")
-        if fortls_path is None:
-            raise RuntimeError("fortls is not installed or not in PATH.\nInstall it with: pip install fortls")
-        return fortls_path
-
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
-        # Check fortls installation
-        fortls_path = self._check_fortls_installation()
+        super().__init__(config, repository_root_path, None, "fortran", solidlsp_settings)
 
-        # Command to start fortls language server
-        # fortls uses stdio for LSP communication by default
-        fortls_cmd = f"{fortls_path}"
-
-        super().__init__(
-            config, repository_root_path, ProcessLaunchInfo(cmd=fortls_cmd, cwd=repository_root_path), "fortran", solidlsp_settings
+    def _create_dependency_provider(self) -> LanguageServerDependencyProvider:
+        return LanguageServerDependencyProviderUvx(
+            self._custom_settings,
+            self._ls_resources_dir,
+            package="fortls",
+            entrypoint="fortls",
+            default_version=FORTLS_VERSION,
+            version_setting_key="fortls_version",
         )
-        self.server_ready = threading.Event()
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """Initialize params for Fortran Language Server."""
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -222,6 +215,7 @@ class FortranLanguageServer(SolidLanguageServer):
                     "formatting": {"dynamicRegistration": True},
                     "rangeFormatting": {"dynamicRegistration": True},
                     "codeAction": {"dynamicRegistration": True},
+                    "publishDiagnostics": {"relatedInformation": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
@@ -232,17 +226,8 @@ class FortranLanguageServer(SolidLanguageServer):
                     },
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start Fortran Language Server process."""
@@ -265,7 +250,7 @@ class FortranLanguageServer(SolidLanguageServer):
         log.info("Starting Fortran Language Server (fortls) process")
         self.server.start()
 
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
         log.info("Sending initialize request to Fortran Language Server")
 
         init_response = self.server.send.initialize(initialize_params)
@@ -283,8 +268,37 @@ class FortranLanguageServer(SolidLanguageServer):
             log.info("Fortran LSP document symbol provider available")
 
         self.server.notify.initialized({})
-        self.completions_available.set()
 
         # Fortran Language Server is ready after initialization
-        self.server_ready.set()
         log.info("Fortran Language Server initialization complete")
+
+    @override
+    def request_text_document_diagnostics(
+        self,
+        relative_file_path: str,
+        start_line: int = 0,
+        end_line: int = -1,
+        min_severity: int = 4,
+    ) -> list[ls_types.Diagnostic]:
+        uri = self._validate_text_document_diagnostics_request(relative_file_path, start_line, end_line, min_severity)
+        diagnostics_before_request = self._get_published_diagnostics_generation(uri)
+
+        with self.open_file(relative_file_path):
+            self.server.notify.did_save_text_document(
+                {  # ty: ignore[invalid-argument-type]  # dict built from LSPConstants keys; shape matches the TypedDict
+                    LSPConstants.TEXT_DOCUMENT: {
+                        LSPConstants.URI: uri,
+                    }
+                }
+            )
+            diagnostics = self._wait_for_relevant_published_diagnostics(
+                uri=uri,
+                after_generation=diagnostics_before_request,
+                timeout=self._get_published_diagnostics_wait_timeout(True),
+                allow_cached=True,
+            )
+
+        if diagnostics is None:
+            return []
+
+        return self._filter_diagnostics(diagnostics, start_line, end_line, min_severity)

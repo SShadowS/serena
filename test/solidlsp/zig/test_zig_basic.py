@@ -13,6 +13,8 @@ import pytest
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_types import SymbolKind
+from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
+from test.solidlsp.util.diagnostics import assert_file_diagnostics
 
 
 @pytest.mark.zig
@@ -143,6 +145,11 @@ class TestZigLanguageServer:
     @pytest.mark.skipif(
         sys.platform == "win32", reason="ZLS cross-file references don't work reliably on Windows - URI path handling issues"
     )
+    @pytest.mark.xfail(
+        sys.platform == "darwin",
+        reason="ZLS cross-file references are flaky on macOS CI: sometimes finds 0 Calculator references in main.zig",
+        strict=False,
+    )
     def test_cross_file_references_with_open_files(self, language_server: SolidLanguageServer) -> None:
         """
         Test finding cross-file references with files open.
@@ -193,9 +200,9 @@ class TestZigLanguageServer:
 
                     # Verify exact location in main.zig (line 8, 0-indexed: 7)
                     main_ref_line = main_refs[0]["range"]["start"]["line"]
-                    assert (
-                        main_ref_line == 7
-                    ), f"Calculator reference in main.zig should be at line 8 (0-indexed: 7), found at line {main_ref_line + 1}"
+                    assert main_ref_line == 7, (
+                        f"Calculator reference in main.zig should be at line 8 (0-indexed: 7), found at line {main_ref_line + 1}"
+                    )
 
     @pytest.mark.parametrize("language_server", [Language.ZIG], indirect=True)
     def test_cross_file_references_within_file(self, language_server: SolidLanguageServer) -> None:
@@ -341,3 +348,25 @@ class TestZigLanguageServer:
         root = symbols[0]
         assert isinstance(root, dict), "Root should be a dict"
         assert "name" in root, "Root should have a name"
+
+    @pytest.mark.parametrize("language_server", [Language.ZIG], indirect=True)
+    def test_bare_symbol_names(self, language_server) -> None:
+        all_symbols = request_all_symbols(language_server)
+        malformed_symbols = []
+        for s in all_symbols:
+            if has_malformed_name(s, whitespace_allowed=True):
+                malformed_symbols.append(s)
+        if malformed_symbols:
+            pytest.fail(
+                f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
+                pytrace=False,
+            )
+
+    @pytest.mark.parametrize("language_server", [Language.ZIG], indirect=True)
+    def test_file_diagnostics(self, language_server: SolidLanguageServer) -> None:
+        assert_file_diagnostics(
+            language_server,
+            "src/diagnostics_sample.zig",
+            (),
+            min_count=1,
+        )

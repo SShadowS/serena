@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import platform
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
@@ -9,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from solidlsp.ls_utils import FileUtils, PlatformUtils
-from solidlsp.util.subprocess_util import subprocess_kwargs
+from solidlsp.util import subprocess_util
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +22,8 @@ class RuntimeDependency:
     id: str
     platform_id: str | None = None
     url: str | None = None
+    sha256: str | None = None
+    allowed_hosts: tuple[str, ...] | list[str] | None = None
     archive_type: str | None = None
     binary_name: str | None = None
     command: str | list[str] | None = None
@@ -98,36 +101,30 @@ class RuntimeDependencyCollection:
 
     @staticmethod
     def _run_command(command: str | list[str], cwd: str) -> None:
-        kwargs = subprocess_kwargs()
+        kwargs = subprocess_util.subprocess_kwargs()
         if not PlatformUtils.get_platform_id().is_windows():
             import pwd
 
-            kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name  # type: ignore
+            kwargs["user"] = pwd.getpwuid(os.getuid()).pw_name
 
-        is_windows = platform.system() == "Windows"
-        if not isinstance(command, str) and not is_windows:
-            # Since we are using the shell, we need to convert the command list to a single string
-            # on Linux/macOS
-            command = " ".join(command)
-
+        command = subprocess_util.convert_shell_cmd(command)
         log.info("Running command %s in '%s'", f"'{command}'" if isinstance(command, str) else command, cwd)
 
         completed_process = subprocess.run(
             command,
             shell=True,
-            check=True,
+            check=False,
             cwd=cwd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             **kwargs,
-        )  # type: ignore
+        )
         if completed_process.returncode != 0:
             log.warning("Command '%s' failed with return code %d", command, completed_process.returncode)
             log.warning("Command output:\n%s", completed_process.stdout)
-        else:
-            log.info(
-                "Command completed successfully",
-            )
+            raise subprocess.CalledProcessError(completed_process.returncode, command, completed_process.stdout)
+        log.info("Command completed successfully")
 
     @staticmethod
     def _install_from_url(dep: RuntimeDependency, target_dir: str) -> None:
@@ -136,9 +133,30 @@ class RuntimeDependencyCollection:
 
         if dep.archive_type in ("gz", "binary") and dep.binary_name:
             dest = os.path.join(target_dir, dep.binary_name)
-            FileUtils.download_and_extract_archive(dep.url, dest, dep.archive_type)
+            FileUtils.download_and_extract_archive_verified(
+                dep.url,
+                dest,
+                dep.archive_type,
+                expected_sha256=dep.sha256,
+                allowed_hosts=dep.allowed_hosts,
+            )
         else:
-            FileUtils.download_and_extract_archive(dep.url, target_dir, dep.archive_type or "zip")
+            FileUtils.download_and_extract_archive_verified(
+                dep.url,
+                target_dir,
+                dep.archive_type or "zip",
+                expected_sha256=dep.sha256,
+                allowed_hosts=dep.allowed_hosts,
+            )
+
+
+def build_npm_install_command(package_name: str, version: str, registry: str | None = None) -> list[str]:
+    """Build a pinned npm install command for a package in a Serena-managed install directory."""
+    command = ["npm", "install", "--prefix", "./"]
+    if registry:
+        command.extend(["--registry", registry])
+    command.append(f"{package_name}@{version}")
+    return command
 
 
 def quote_windows_path(path: str) -> str:
@@ -162,3 +180,13 @@ def quote_windows_path(path: str) -> str:
             return path
         return f'"{path}"'
     return path
+
+
+UE_IGNORED_DIRNAMES = frozenset({"Binaries", "DerivedDataCache", "Intermediate", "Saved"})
+"""Unreal Engine build and cache directories. Matched per directory name, so per-plugin and
+per-module copies (e.g. ``Plugins/Foo/Intermediate``) are covered too."""
+
+
+def is_unreal_engine_project(repository_root_path: str) -> bool:
+    """:return: whether the repository root contains an Unreal Engine ``.uproject`` file."""
+    return any(pathlib.Path(repository_root_path).glob("*.uproject"))

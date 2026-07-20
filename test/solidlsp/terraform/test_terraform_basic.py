@@ -9,8 +9,12 @@ import pytest
 
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
+from solidlsp.ls_types import SymbolKind
+from test.conftest import language_tests_enabled
+from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
+@pytest.mark.skipif(not language_tests_enabled(Language.TERRAFORM), reason="Terraform tests are disabled (terraform CLI not available)")
 @pytest.mark.terraform
 class TestLanguageServerBasics:
     """Test basic functionality of the Terraform language server."""
@@ -51,3 +55,18 @@ class TestLanguageServerBasics:
         sel_start = var_symbol["selectionRange"]["start"]
         references = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
         assert len(references) >= 1, "variable should be referenced at least once"
+
+    @pytest.mark.parametrize("language_server", [Language.TERRAFORM], indirect=True)
+    def test_bare_symbol_names(self, language_server) -> None:
+        all_symbols = request_all_symbols(language_server)
+        malformed_symbols = []
+        for s in all_symbols:
+            if s["kind"] == SymbolKind.Class:
+                continue
+            if has_malformed_name(s):
+                malformed_symbols.append(s)
+        if malformed_symbols:
+            pytest.fail(
+                f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
+                pytrace=False,
+            )

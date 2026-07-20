@@ -1,15 +1,11 @@
 import logging
-import os
-import pathlib
 import subprocess
-import threading
 from typing import Any
 
 from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
@@ -68,12 +64,9 @@ class RLanguageServer(SolidLanguageServer):
         r_cmd = 'R --vanilla --quiet --slave -e "options(languageserver.debug_mode = FALSE); languageserver::run()"'
 
         super().__init__(config, repository_root_path, ProcessLaunchInfo(cmd=r_cmd, cwd=repository_root_path), "r", solidlsp_settings)
-        self.server_ready = threading.Event()
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """Initialize params for R Language Server."""
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -109,17 +102,8 @@ class RLanguageServer(SolidLanguageServer):
                     },
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
         }
-        return initialize_params  # type: ignore
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start R Language Server process."""
@@ -142,7 +126,7 @@ class RLanguageServer(SolidLanguageServer):
         log.info("Starting R Language Server process")
         self.server.start()
 
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
         log.info(
             "Sending initialize request to R Language Server",
         )
@@ -158,7 +142,5 @@ class RLanguageServer(SolidLanguageServer):
             log.info("R LSP definition provider available")
 
         self.server.notify.initialized({})
-        self.completions_available.set()
 
         # R Language Server is ready after initialization
-        self.server_ready.set()

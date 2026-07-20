@@ -4,14 +4,14 @@ import pathlib
 import stat
 import subprocess
 import threading
-from typing import Any, cast
+from collections.abc import Hashable
+from typing import Any
 
 from overrides import override
 
-from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls import RawDocumentSymbol, SolidLanguageServer
+from solidlsp.ls_config import Language, LanguageServerConfig
 from solidlsp.ls_utils import FileUtils, PlatformId, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
@@ -19,10 +19,21 @@ from ..common import RuntimeDependency
 
 log = logging.getLogger(__name__)
 
+EXPERT_VERSION = "v0.1.0-rc.6"
+EXPERT_ALLOWED_HOSTS = (
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+)
+
 
 class ElixirTools(SolidLanguageServer):
     """
     Provides Elixir specific instantiation of the LanguageServer class using Expert, the official Elixir language server.
+
+    You can pass the following entries in ``ls_specific_settings["elixir"]``:
+        - expert_version: Override the pinned Expert version downloaded by Serena
+          (default: the bundled Serena version).
     """
 
     @override
@@ -66,6 +77,8 @@ class ElixirTools(SolidLanguageServer):
         Setup runtime dependencies for Expert.
         Downloads the Expert binary for the current platform and returns the path to the executable.
         """
+        elixir_settings = solidlsp_settings.get_ls_specific_settings(Language.ELIXIR)
+        expert_version = elixir_settings.get("expert_version", EXPERT_VERSION)
         # Check if Elixir is available first
         elixir_version = cls._get_elixir_version()
         if not elixir_version:
@@ -91,63 +104,62 @@ class ElixirTools(SolidLanguageServer):
             PlatformId.OSX_x64,
             PlatformId.OSX_arm64,
             PlatformId.WIN_x64,
-            PlatformId.WIN_arm64,
         ]
         assert platform_id in valid_platforms, f"Platform {platform_id} is not supported for Expert at the moment"
 
         expert_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), "expert")
-
-        EXPERT_VERSION = "nightly"
 
         # Define runtime dependencies inline
         runtime_deps = {
             PlatformId.LINUX_x64: RuntimeDependency(
                 id="expert_linux_amd64",
                 platform_id="linux-x64",
-                url=f"https://github.com/elixir-lang/expert/releases/download/{EXPERT_VERSION}/expert_linux_amd64",
+                url=f"https://github.com/elixir-lang/expert/releases/download/{expert_version}/expert_linux_amd64",
                 archive_type="binary",
                 binary_name="expert_linux_amd64",
                 extract_path="expert",
+                sha256="643a492ff972246668b0ca356a84c3d0a0f5feeae0ab5dc1b9a126876ed460e4" if expert_version == EXPERT_VERSION else None,
+                allowed_hosts=EXPERT_ALLOWED_HOSTS,
             ),
             PlatformId.LINUX_arm64: RuntimeDependency(
                 id="expert_linux_arm64",
                 platform_id="linux-arm64",
-                url=f"https://github.com/elixir-lang/expert/releases/download/{EXPERT_VERSION}/expert_linux_arm64",
+                url=f"https://github.com/elixir-lang/expert/releases/download/{expert_version}/expert_linux_arm64",
                 archive_type="binary",
                 binary_name="expert_linux_arm64",
                 extract_path="expert",
+                sha256="d8b830bdaa8991d7ebf255dacbb3674f3ea335c87d0bfba4b7f907ded4a8f014" if expert_version == EXPERT_VERSION else None,
+                allowed_hosts=EXPERT_ALLOWED_HOSTS,
             ),
             PlatformId.OSX_x64: RuntimeDependency(
                 id="expert_darwin_amd64",
                 platform_id="osx-x64",
-                url=f"https://github.com/elixir-lang/expert/releases/download/{EXPERT_VERSION}/expert_darwin_amd64",
+                url=f"https://github.com/elixir-lang/expert/releases/download/{expert_version}/expert_darwin_amd64",
                 archive_type="binary",
                 binary_name="expert_darwin_amd64",
                 extract_path="expert",
+                sha256="964f316f1633090b33aab392b6b85fb778c5fb3c0db862671424458da34b1d4d" if expert_version == EXPERT_VERSION else None,
+                allowed_hosts=EXPERT_ALLOWED_HOSTS,
             ),
             PlatformId.OSX_arm64: RuntimeDependency(
                 id="expert_darwin_arm64",
                 platform_id="osx-arm64",
-                url=f"https://github.com/elixir-lang/expert/releases/download/{EXPERT_VERSION}/expert_darwin_arm64",
+                url=f"https://github.com/elixir-lang/expert/releases/download/{expert_version}/expert_darwin_arm64",
                 archive_type="binary",
                 binary_name="expert_darwin_arm64",
                 extract_path="expert",
+                sha256="5fb5be151baedd635d99835cf3f9986afc9af6ae7b07bd001a1962f4298e45da" if expert_version == EXPERT_VERSION else None,
+                allowed_hosts=EXPERT_ALLOWED_HOSTS,
             ),
             PlatformId.WIN_x64: RuntimeDependency(
                 id="expert_windows_amd64",
                 platform_id="win-x64",
-                url=f"https://github.com/elixir-lang/expert/releases/download/{EXPERT_VERSION}/expert_windows_amd64.exe",
+                url=f"https://github.com/elixir-lang/expert/releases/download/{expert_version}/expert_windows_amd64.exe",
                 archive_type="binary",
                 binary_name="expert_windows_amd64.exe",
                 extract_path="expert.exe",
-            ),
-            PlatformId.WIN_arm64: RuntimeDependency(
-                id="expert_windows_arm64",
-                platform_id="win-arm64",
-                url=f"https://github.com/elixir-lang/expert/releases/download/{EXPERT_VERSION}/expert_windows_arm64.exe",
-                archive_type="binary",
-                binary_name="expert_windows_arm64.exe",
-                extract_path="expert.exe",
+                sha256="babee77d2653679021600b99c68d984d4463290cb221e0fc0d1093b3afdeb3b0" if expert_version == EXPERT_VERSION else None,
+                allowed_hosts=EXPERT_ALLOWED_HOSTS,
             ),
         }
 
@@ -161,7 +173,12 @@ class ElixirTools(SolidLanguageServer):
         if not os.path.exists(executable_path):
             log.info(f"Downloading Expert binary from {dependency.url}")
             assert dependency.url is not None
-            FileUtils.download_file(dependency.url, binary_path)
+            FileUtils.download_file_verified(
+                dependency.url,
+                binary_path,
+                expected_sha256=dependency.sha256,
+                allowed_hosts=dependency.allowed_hosts,
+            )
 
             # Make the binary executable on Unix-like systems
             if not platform_id.value.startswith("win"):
@@ -172,6 +189,10 @@ class ElixirTools(SolidLanguageServer):
                 if os.path.exists(executable_path):
                     os.remove(executable_path)
                 os.symlink(os.path.basename(binary_path), executable_path)
+
+            # normalizing the executable name on Windows
+            if binary_path != executable_path and platform_id.value.startswith("win"):
+                shutil.copy2(binary_path, executable_path)
 
         assert os.path.exists(executable_path), f"Expert executable not found at {executable_path}"
 
@@ -190,23 +211,56 @@ class ElixirTools(SolidLanguageServer):
         )
         self.server_ready = threading.Event()
         self.request_id = 0
+        self._building_project = False
 
         # Set generous timeout for Expert which can be slow to initialize and respond
         self.set_request_timeout(180.0)
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    @override
+    def _document_symbols_cache_fingerprint(self) -> Hashable:
+        normalize_symbol_name_version = 1
+        return normalize_symbol_name_version
+
+    @override
+    def _normalize_symbol_name(self, symbol: RawDocumentSymbol, relative_file_path: str) -> str:
+        return symbol["name"].removeprefix("defp ").removeprefix("def ").split("(", 1)[0].strip()
+
+    def _find_mix_exs(self) -> str | None:
+        """
+        Find mix.exs in the repository.
+
+        Checks {repository_root_path}/mix.exs first (standard layout), then scans
+        immediate subdirectories for mix.exs (monorepo layout, e.g. server/mix.exs).
+        Returns the absolute path to the first match found, or None if not found.
+
+        Note: subdirectory iteration order depends on the filesystem (os.listdir).
+        In practice this is fine — monorepos typically have one Elixir app.
+        """
+        # Check root first
+        root_mix_exs = os.path.join(self.repository_root_path, "mix.exs")
+        if os.path.exists(root_mix_exs):
+            return root_mix_exs
+
+        # Search immediate subdirectories
+        try:
+            for entry in os.listdir(self.repository_root_path):
+                subdir_path = os.path.join(self.repository_root_path, entry)
+                if os.path.isdir(subdir_path):
+                    subdir_mix_exs = os.path.join(subdir_path, "mix.exs")
+                    if os.path.exists(subdir_mix_exs):
+                        log.info(f"Found mix.exs in subdirectory: {entry}/mix.exs")
+                        return subdir_mix_exs
+        except OSError as e:
+            log.warning(f"Error scanning for mix.exs in subdirectories: {e}")
+
+        return None
+
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Expert Language Server.
         """
-        # Ensure the path is absolute
-        abs_path = os.path.abspath(repository_absolute_path)
-        root_uri = pathlib.Path(abs_path).as_uri()
         initialize_params = {
-            "processId": os.getpid(),
             "locale": "en",
-            "rootPath": abs_path,
-            "rootUri": root_uri,
             "initializationOptions": {
                 "mix_env": "dev",
                 "mix_target": "host",
@@ -257,10 +311,9 @@ class ElixirTools(SolidLanguageServer):
                     "workDoneProgress": True,
                 },
             },
-            "workspaceFolders": [{"uri": root_uri, "name": os.path.basename(repository_absolute_path)}],
         }
 
-        return cast(InitializeParams, initialize_params)
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start Expert server process"""
@@ -319,7 +372,7 @@ class ElixirTools(SolidLanguageServer):
 
         log.debug("Starting Expert server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.debug("Sending initialize request to Expert")
         init_response = self.server.send.initialize(initialize_params)
@@ -328,7 +381,29 @@ class ElixirTools(SolidLanguageServer):
         assert "textDocumentSync" in init_response["capabilities"], f"Missing textDocumentSync in {init_response['capabilities']}"
 
         self.server.notify.initialized({})
-        self.completions_available.set()
+
+        # Expert's build pipeline is triggered by a textDocument/didOpen notification.
+        # Without it Expert sits idle and never emits the $/progress signals we wait for,
+        # causing a deadlock. Opening mix.exs is the minimal trigger; we close it again
+        # once the server is ready so it does not linger in the open-file set.
+        mix_exs_path = self._find_mix_exs()
+        mix_exs_uri: str | None = None
+
+        if mix_exs_path is not None:
+            mix_exs_uri = pathlib.Path(mix_exs_path).as_uri()
+            with open(mix_exs_path, encoding="utf-8") as f:
+                mix_exs_content = f.read()
+            self.server.notify.did_open_text_document(
+                {
+                    "textDocument": {
+                        "uri": mix_exs_uri,
+                        "languageId": "elixir",
+                        "version": 1,
+                        "text": mix_exs_content,
+                    }
+                }
+            )
+            log.debug("Opened mix.exs to trigger Expert's build pipeline")
 
         # Expert needs time to compile the project and build indexes on first run.
         # This can take 2-3+ minutes for mid-sized codebases.
@@ -340,3 +415,7 @@ class ElixirTools(SolidLanguageServer):
         else:
             log.warning(f"Expert did not signal readiness within {ready_timeout}s. Proceeding with requests anyway.")
             self.server_ready.set()  # Mark as ready anyway to allow requests
+
+        if mix_exs_uri is not None:
+            self.server.notify.did_close_text_document({"textDocument": {"uri": mix_exs_uri}})
+            log.debug("Closed mix.exs after Expert is ready")

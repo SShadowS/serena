@@ -5,8 +5,11 @@ import pytest
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_utils import SymbolUtils
+from test.conftest import language_tests_enabled
+from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
+@pytest.mark.skipif(not language_tests_enabled(Language.ELM), reason="Elm tests are disabled (elm compiler not available)")
 @pytest.mark.elm
 class TestElmLanguageServer:
     @pytest.mark.parametrize("language_server", [Language.ELM], indirect=True)
@@ -52,3 +55,16 @@ class TestElmLanguageServer:
 
         # Verify that at least one reference is in Main.elm (where formatMessage is used)
         assert any("Main.elm" in ref.get("relativePath", "") for ref in refs), "Expected to find usage of formatMessage in Main.elm"
+
+    @pytest.mark.parametrize("language_server", [Language.ELM], indirect=True)
+    def test_bare_symbol_names(self, language_server) -> None:
+        all_symbols = request_all_symbols(language_server)
+        malformed_symbols = []
+        for s in all_symbols:
+            if has_malformed_name(s):
+                malformed_symbols.append(s)
+        if malformed_symbols:
+            pytest.fail(
+                f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
+                pytrace=False,
+            )

@@ -8,13 +8,11 @@ import pathlib
 import platform
 import shutil
 import subprocess
-import threading
 
 from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
@@ -71,8 +69,7 @@ class ZigLanguageServer(SolidLanguageServer):
         # Check for Windows and provide error message
         if platform.system() == "Windows":
             raise RuntimeError(
-                "Windows is not supported by ZLS in this integration. "
-                "Cross-file references don't work reliably on Windows. Reason unknown."
+                "Windows is not supported by ZLS in this integration. Cross-file references don't work reliably on Windows. Reason unknown."
             )
 
         zig_version = ZigLanguageServer._get_zig_version()
@@ -100,15 +97,12 @@ class ZigLanguageServer(SolidLanguageServer):
         self._setup_runtime_dependency()
 
         super().__init__(config, repository_root_path, ProcessLaunchInfo(cmd="zls", cwd=repository_root_path), "zig", solidlsp_settings)
-        self.server_ready = threading.Event()
         self.request_id = 0
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Zig Language Server.
         """
-        root_uri = pathlib.Path(repository_absolute_path).as_uri()
         initialize_params = {
             "locale": "en",
             "capabilities": {
@@ -135,6 +129,7 @@ class ZigLanguageServer(SolidLanguageServer):
                         "dynamicRegistration": True,
                         "contentFormat": ["markdown", "plaintext"],
                     },
+                    "publishDiagnostics": {"relatedInformation": True},
                 },
                 "workspace": {
                     "workspaceFolders": True,
@@ -142,15 +137,6 @@ class ZigLanguageServer(SolidLanguageServer):
                     "configuration": True,
                 },
             },
-            "processId": os.getpid(),
-            "rootPath": repository_absolute_path,
-            "rootUri": root_uri,
-            "workspaceFolders": [
-                {
-                    "uri": root_uri,
-                    "name": os.path.basename(repository_absolute_path),
-                }
-            ],
             "initializationOptions": {
                 # ZLS specific options based on schema.json
                 # Critical paths for ZLS to understand the project
@@ -180,7 +166,7 @@ class ZigLanguageServer(SolidLanguageServer):
                 "inlay_hints_hide_redundant_param_names_last_token": False,
             },
         }
-        return initialize_params  # type: ignore[return-value]
+        return initialize_params
 
     def _start_server(self) -> None:
         """Start ZLS server process"""
@@ -201,7 +187,7 @@ class ZigLanguageServer(SolidLanguageServer):
 
         log.info("Starting ZLS server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -213,11 +199,9 @@ class ZigLanguageServer(SolidLanguageServer):
         assert "referencesProvider" in init_response["capabilities"]
 
         self.server.notify.initialized({})
-        self.completions_available.set()
 
         # ZLS server is ready after initialization
-        self.server_ready.set()
-        self.server_ready.wait()
+        # (no need to wait for an event)
 
         # Open build.zig if it exists to help ZLS understand project structure
         build_zig_path = os.path.join(self.repository_root_path, "build.zig")

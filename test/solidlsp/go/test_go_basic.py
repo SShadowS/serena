@@ -3,9 +3,12 @@ from pathlib import Path
 
 import pytest
 
+from serena.symbol import LanguageServerSymbol
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_utils import SymbolUtils
+from test.conftest import find_identifier_position, get_repo_path, language_has_verified_implementation_support
+from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
 @pytest.mark.go
@@ -16,6 +19,20 @@ class TestGoLanguageServer:
         assert SymbolUtils.symbol_tree_contains_name(symbols, "main"), "main function not found in symbol tree"
         assert SymbolUtils.symbol_tree_contains_name(symbols, "Helper"), "Helper function not found in symbol tree"
         assert SymbolUtils.symbol_tree_contains_name(symbols, "DemoStruct"), "DemoStruct not found in symbol tree"
+
+    @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
+    def test_find_symbol_matches_go_method_by_bare_name(self, language_server: SolidLanguageServer) -> None:
+        symbols = language_server.request_full_symbol_tree(within_relative_path="main.go")
+
+        assert SymbolUtils.symbol_tree_contains_name(symbols, "Value"), "Expected Go method name to be normalized to bare name"
+        assert not SymbolUtils.symbol_tree_contains_name(symbols, "(*DemoStruct).Value"), (
+            "Expected receiver-qualified Go method name to be normalized away"
+        )
+
+        bare_name_matches = [match for root in symbols for match in LanguageServerSymbol(root).find("Value")]
+
+        assert bare_name_matches, "Expected a Go method to match by bare name"
+        assert all(match.name == "Value" for match in bare_name_matches)
 
     @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
     def test_find_referencing_symbols(self, language_server: SolidLanguageServer) -> None:
@@ -30,6 +47,73 @@ class TestGoLanguageServer:
         sel_start = helper_symbol["selectionRange"]["start"]
         refs = language_server.request_references(file_path, sel_start["line"], sel_start["character"])
         assert any("main.go" in ref.get("uri", "") for ref in refs), "Expected at least one reference result to point at main.go"
+
+    @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
+    def test_type_var_const_body_includes_leading_keyword(self, language_server: SolidLanguageServer) -> None:
+        """
+        Single ``type``/``var``/``const`` declarations must expose a body and replacement range that
+        include the leading keyword, just like ``func`` declarations do.
+
+        Regression test for gopls reporting the symbol range of such declarations starting at the
+        declared identifier (after the keyword) rather than at the keyword. That asymmetry made
+        replace_symbol_body drop the keyword from the body and replacement range, so a natural
+        keyword-inclusive round-trip edit corrupted the file (e.g. ``type Foo`` -> ``type type Foo``).
+        """
+        all_symbols, _ = language_server.request_document_symbols("symbol_body.go").get_all_symbols_and_roots()
+        symbols_by_name = {sym.get("name"): sym for sym in all_symbols}
+
+        # single declarations: body starts with the keyword, the range start moves to the keyword
+        # (column 0 here), and the selection range still points at the identifier after the keyword
+        expected_keyword_by_name = {
+            "BodyStruct": "type ",
+            "NamedInt": "type ",
+            "AliasInt": "type ",
+            "GlobalCounter": "var ",
+            "MaxItems": "const ",
+        }
+        for name, keyword in expected_keyword_by_name.items():
+            sym = symbols_by_name.get(name)
+            assert sym is not None, f"{name} not found in symbol_body.go"
+            body = sym["body"].get_text()
+            assert body.startswith(keyword), f"Expected body of {name} to start with {keyword!r}, got {body[:24]!r}"
+            assert sym["location"]["range"]["start"]["character"] == 0, f"Expected {name} body range to start at the keyword (col 0)"
+            assert sym["selectionRange"]["start"]["character"] > 0, f"Expected {name} selectionRange to point at the identifier"
+
+        # grouped declarations keep the keyword on a separate line (e.g. ``var ( ... )``), so their
+        # bodies must NOT include it and their ranges must be left untouched
+        for name in ("GroupedA", "GroupedB"):
+            sym = symbols_by_name.get(name)
+            assert sym is not None, f"{name} not found in symbol_body.go"
+            body = sym["body"].get_text()
+            assert body.startswith(name), f"Expected grouped var {name} body to start with the identifier, got {body[:24]!r}"
+            assert not body.startswith("var"), f"Grouped var {name} body must not include the 'var' keyword"
+
+    if language_has_verified_implementation_support(Language.GO):
+
+        @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
+        def test_find_implementations(self, language_server: SolidLanguageServer) -> None:
+            repo_path = get_repo_path(Language.GO)
+            pos = find_identifier_position(repo_path / "main.go", "FormatGreeting")
+            assert pos is not None, "Could not find Greeter.FormatGreeting in fixture"
+
+            implementations = language_server.request_implementation("main.go", *pos)
+            assert implementations, "Expected at least one implementation of Greeter.FormatGreeting"
+            assert any("main.go" in implementation.get("relativePath", "") for implementation in implementations), (
+                f"Expected ConsoleGreeter.FormatGreeting in implementations, got: {implementations}"
+            )
+
+        @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
+        def test_request_implementing_symbols(self, language_server: SolidLanguageServer) -> None:
+            repo_path = get_repo_path(Language.GO)
+            pos = find_identifier_position(repo_path / "main.go", "FormatGreeting")
+            assert pos is not None, "Could not find Greeter.FormatGreeting in fixture"
+
+            implementing_symbols = language_server.request_implementing_symbols("main.go", *pos)
+            assert implementing_symbols, "Expected implementing symbols for Greeter.FormatGreeting"
+            assert any(
+                symbol.get("name") == "FormatGreeting" and "main.go" in symbol["location"].get("relativePath", "")
+                for symbol in implementing_symbols
+            ), f"Expected FormatGreeting symbol, got: {implementing_symbols}"
 
 
 def _filter_symbols_by_name_in_repo(symbols: list | None, target_name: str, repo_name: str = "test_repo") -> list:
@@ -154,9 +238,9 @@ class TestGoBuildTags:
 
             assert versioned_cache_files, f"Expected at least one SolidLSP cache file with a __cache_version under {cache_dir}"
             saved_versions = {v for _, v in versioned_cache_files}
-            assert (
-                default_raw_cache_version in saved_versions or default_doc_cache_version in saved_versions
-            ), "Expected at least one persisted cache to match the default-context cache version"
+            assert default_raw_cache_version in saved_versions or default_doc_cache_version in saved_versions, (
+                "Expected at least one persisted cache to match the default-context cache version"
+            )
 
         # Run 2 (default context again): prove that persisted caches are actually loaded and used.
         with start_ls_context(Language.GO, repo_path=str(repo_path), solidlsp_dir=tmp_path) as ls_default_again:
@@ -192,3 +276,16 @@ class TestGoBuildTags:
 
             # A cache miss should repopulate and mark caches modified.
             _assert_caches_modified(ls_foo)
+
+    @pytest.mark.parametrize("language_server", [Language.GO], indirect=True)
+    def test_bare_symbol_names(self, language_server) -> None:
+        all_symbols = request_all_symbols(language_server)
+        malformed_symbols = []
+        for s in all_symbols:
+            if has_malformed_name(s):
+                malformed_symbols.append(s)
+        if malformed_symbols:
+            pytest.fail(
+                f"Found malformed symbols: {[format_symbol_for_assert(sym) for sym in malformed_symbols]}",
+                pytrace=False,
+            )

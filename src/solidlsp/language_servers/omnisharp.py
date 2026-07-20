@@ -5,21 +5,28 @@ Provides C# specific instantiation of the LanguageServer class. Contains various
 import json
 import logging
 import os
-import pathlib
 import threading
 from collections.abc import Iterable
 
 from overrides import override
 
 from solidlsp.ls import SolidLanguageServer
-from solidlsp.ls_config import LanguageServerConfig
+from solidlsp.ls_config import Language, LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
 from solidlsp.ls_utils import DotnetVersion, FileUtils, PlatformId, PlatformUtils
-from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
 from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+OMNISHARP_ALLOWED_HOSTS = ("roslynomnisharp.blob.core.windows.net", "download.visualstudio.microsoft.com")
+# Version pinning convention (see eclipse_jdtls.py for the full spec):
+#   INITIAL_* — frozen forever; legacy unversioned install dir is reserved for it.
+#   DEFAULT_* — bumped on upgrades; goes into a versioned subdir.
+INITIAL_OMNISHARP_VERSION = "1.39.10"
+INITIAL_RAZOR_OMNISHARP_VERSION = "7.0.0-preview.23363.1"
+DEFAULT_OMNISHARP_VERSION = "1.39.10"
+DEFAULT_RAZOR_OMNISHARP_VERSION = "7.0.0-preview.23363.1"
 
 
 def breadth_first_file_scan(root: str) -> Iterable[str]:
@@ -58,6 +65,10 @@ def find_least_depth_sln_file(root_dir: str) -> str | None:
 class OmniSharp(SolidLanguageServer):
     """
     Provides C# specific instantiation of the LanguageServer class. Contains various configurations and settings specific to C#.
+
+    You can pass the following entries in ``ls_specific_settings["csharp_omnisharp"]``:
+        - omnisharp_version: Override the pinned OmniSharp version downloaded by Serena.
+        - razor_omnisharp_version: Override the pinned Razor plugin version downloaded by Serena.
     """
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
@@ -108,13 +119,13 @@ class OmniSharp(SolidLanguageServer):
         self.server_ready = threading.Event()
         self.definition_available = threading.Event()
         self.references_available = threading.Event()
+        self.completions_available = threading.Event()
 
     @override
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in ["bin", "obj"]
 
-    @staticmethod
-    def _get_initialize_params(repository_absolute_path: str) -> InitializeParams:
+    def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Omnisharp Language Server.
         """
@@ -123,18 +134,10 @@ class OmniSharp(SolidLanguageServer):
 
         del d["_description"]
 
-        d["processId"] = os.getpid()
-        assert d["rootPath"] == "$rootPath"
-        d["rootPath"] = repository_absolute_path
-
-        assert d["rootUri"] == "$rootUri"
-        d["rootUri"] = pathlib.Path(repository_absolute_path).as_uri()
-
-        assert d["workspaceFolders"][0]["uri"] == "$uri"
-        d["workspaceFolders"][0]["uri"] = pathlib.Path(repository_absolute_path).as_uri()
-
-        assert d["workspaceFolders"][0]["name"] == "$name"
-        d["workspaceFolders"][0]["name"] = os.path.basename(repository_absolute_path)
+        # processId, rootPath, rootUri and workspaceFolders are set centrally by the InitializeParamsBuilder
+        del d["rootPath"]
+        del d["rootUri"]
+        del d["workspaceFolders"]
 
         return d
 
@@ -149,6 +152,22 @@ class OmniSharp(SolidLanguageServer):
         with open(os.path.join(os.path.dirname(__file__), "omnisharp", "runtime_dependencies.json"), encoding="utf-8") as f:
             d = json.load(f)
             del d["_description"]
+        omnisharp_settings = solidlsp_settings.get_ls_specific_settings(Language.CSHARP_OMNISHARP)
+        omnisharp_version = omnisharp_settings.get("omnisharp_version", DEFAULT_OMNISHARP_VERSION)
+        razor_omnisharp_version = omnisharp_settings.get("razor_omnisharp_version", DEFAULT_RAZOR_OMNISHARP_VERSION)
+        for dependency in d["runtimeDependencies"]:
+            if dependency["id"] == "OmniSharp":
+                dependency["url"] = dependency["url"].replace(DEFAULT_OMNISHARP_VERSION, omnisharp_version)
+                if "installPath" in dependency:
+                    dependency["installPath"] = dependency["installPath"].replace(DEFAULT_OMNISHARP_VERSION, omnisharp_version)
+                if "installTestPath" in dependency:
+                    dependency["installTestPath"] = dependency["installTestPath"].replace(DEFAULT_OMNISHARP_VERSION, omnisharp_version)
+                if omnisharp_version not in (INITIAL_OMNISHARP_VERSION, DEFAULT_OMNISHARP_VERSION):
+                    dependency["integrity"] = None
+            elif dependency["id"] == "RazorOmnisharp":
+                dependency["url"] = dependency["url"].replace(DEFAULT_RAZOR_OMNISHARP_VERSION, razor_omnisharp_version)
+                if razor_omnisharp_version not in (INITIAL_RAZOR_OMNISHARP_VERSION, DEFAULT_RAZOR_OMNISHARP_VERSION):
+                    dependency["integrity"] = None
 
         assert platform_id in [
             PlatformId.LINUX_x64,
@@ -182,18 +201,35 @@ class OmniSharp(SolidLanguageServer):
         assert "OmniSharp" in runtime_dependencies
         assert "RazorOmnisharp" in runtime_dependencies
 
-        omnisharp_ls_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), "OmniSharp")
+        # legacy unversioned dir reserved for INITIAL; every other version goes into a versioned subdir
+        omnisharp_dirname = "OmniSharp" if omnisharp_version == INITIAL_OMNISHARP_VERSION else f"OmniSharp-{omnisharp_version}"
+        omnisharp_ls_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), omnisharp_dirname)
         if not os.path.exists(omnisharp_ls_dir):
             os.makedirs(omnisharp_ls_dir)
-            FileUtils.download_and_extract_archive(runtime_dependencies["OmniSharp"]["url"], omnisharp_ls_dir, "zip")
+            FileUtils.download_and_extract_archive_verified(
+                runtime_dependencies["OmniSharp"]["url"],
+                omnisharp_ls_dir,
+                "zip",
+                expected_sha256=runtime_dependencies["OmniSharp"].get("integrity"),
+                allowed_hosts=OMNISHARP_ALLOWED_HOSTS,
+            )
         omnisharp_executable_path = os.path.join(omnisharp_ls_dir, runtime_dependencies["OmniSharp"]["binaryName"])
         assert os.path.exists(omnisharp_executable_path)
         os.chmod(omnisharp_executable_path, 0o755)
 
-        razor_omnisharp_ls_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), "RazorOmnisharp")
+        razor_dirname = (
+            "RazorOmnisharp" if razor_omnisharp_version == INITIAL_RAZOR_OMNISHARP_VERSION else f"RazorOmnisharp-{razor_omnisharp_version}"
+        )
+        razor_omnisharp_ls_dir = os.path.join(cls.ls_resources_dir(solidlsp_settings), razor_dirname)
         if not os.path.exists(razor_omnisharp_ls_dir):
             os.makedirs(razor_omnisharp_ls_dir)
-            FileUtils.download_and_extract_archive(runtime_dependencies["RazorOmnisharp"]["url"], razor_omnisharp_ls_dir, "zip")
+            FileUtils.download_and_extract_archive_verified(
+                runtime_dependencies["RazorOmnisharp"]["url"],
+                razor_omnisharp_ls_dir,
+                "zip",
+                expected_sha256=runtime_dependencies["RazorOmnisharp"].get("integrity"),
+                allowed_hosts=OMNISHARP_ALLOWED_HOSTS,
+            )
         razor_omnisharp_dll_path = os.path.join(razor_omnisharp_ls_dir, runtime_dependencies["RazorOmnisharp"]["dll_path"])
         assert os.path.exists(razor_omnisharp_dll_path)
 
@@ -355,7 +391,7 @@ class OmniSharp(SolidLanguageServer):
 
         log.info("Starting OmniSharp server process")
         self.server.start()
-        initialize_params = self._get_initialize_params(self.repository_root_path)
+        initialize_params = self._create_initialize_params()
 
         log.info("Sending initialize request from LSP client to LSP server and awaiting response")
         init_response = self.server.send.initialize(initialize_params)
@@ -368,5 +404,10 @@ class OmniSharp(SolidLanguageServer):
         if "referencesProvider" in init_response["capabilities"] and init_response["capabilities"]["referencesProvider"]:
             self.references_available.set()
 
-        self.definition_available.wait()
-        self.references_available.wait()
+        missing_capabilities = [
+            name
+            for event, name in ((self.definition_available, "definition"), (self.references_available, "references"))
+            if not event.is_set()
+        ]
+        if missing_capabilities:
+            log.warning("OmniSharp did not advertise capabilities during initialization: %s", ", ".join(missing_capabilities))

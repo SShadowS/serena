@@ -236,20 +236,20 @@ class TestProjectCreateHelper:
 
     def test_create_project_helper_returns_config(self, temp_project_dir):
         """Test that _create_project returns a ProjectConfig with explicit language."""
-        config = ProjectCommands._create_project(temp_project_dir, "test-project", ("python",))
+        config = ProjectCommands._create_project(temp_project_dir, "test-project", ("python",)).project_config
         assert isinstance(config, ProjectConfig)
         assert config.project_name == "test-project"
 
     def test_create_project_helper_with_auto_detect(self, temp_project_dir_with_python_file):
         """Test _create_project with auto-detected language."""
-        config = ProjectCommands._create_project(temp_project_dir_with_python_file, "my-project", ())
+        config = ProjectCommands._create_project(temp_project_dir_with_python_file, "my-project", ()).project_config
         assert isinstance(config, ProjectConfig)
         assert config.project_name == "my-project"
         assert len(config.languages) >= 1
 
     def test_create_project_helper_with_languages(self, temp_project_dir):
         """Test _create_project with language specification."""
-        config = ProjectCommands._create_project(temp_project_dir, None, ("python", "typescript"))
+        config = ProjectCommands._create_project(temp_project_dir, None, ("python", "typescript")).project_config
         assert isinstance(config, ProjectConfig)
         assert len(config.languages) >= 1
 
@@ -315,8 +315,8 @@ class TestFindProjectRoot:
         finally:
             os.chdir(original_cwd)
 
-    def test_falls_back_to_cwd_when_no_markers(self, temp_project_dir):
-        """Test falls back to CWD when no markers exist within boundary."""
+    def test_falls_back_to_none_when_no_markers(self, temp_project_dir):
+        """Test falls back to None when no markers exist within boundary."""
         subdir = os.path.join(temp_project_dir, "src")
         os.makedirs(subdir)
 
@@ -324,7 +324,34 @@ class TestFindProjectRoot:
         try:
             os.chdir(subdir)
             result = find_project_root(root=temp_project_dir)
-            assert os.path.samefile(result, subdir)
+            assert result is None
+        finally:
+            os.chdir(original_cwd)
+
+    def test_git_worktree_not_hijacked_by_ancestor_serena(self, temp_project_dir):
+        """A git worktree nested under a Serena project must resolve to the worktree.
+
+        Regression test: when a git worktree (whose .git is a pointer *file*) lives
+        below a directory that is an explicit Serena project (.serena/project.yml),
+        the worktree's own .git boundary must win over the ancestor's project marker.
+        The old two-pass search returned the ancestor Serena project, causing reads
+        and edits to land in the wrong working tree.
+        """
+        # Ancestor directory is an explicit Serena project.
+        serena_dir = os.path.join(temp_project_dir, ".serena")
+        os.makedirs(serena_dir)
+        Path(os.path.join(serena_dir, "project.yml")).touch()
+        # Nested git worktree: .git is a gitdir pointer file, as created by `git worktree add`.
+        worktree = os.path.join(temp_project_dir, "nested", "worktree")
+        os.makedirs(worktree)
+        Path(os.path.join(worktree, ".git")).write_text("gitdir: /repo/.git/worktrees/wt\n")
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(worktree)
+            result = find_project_root(root=temp_project_dir)
+            assert result is not None
+            assert os.path.samefile(result, worktree)
         finally:
             os.chdir(original_cwd)
 

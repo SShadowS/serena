@@ -14,11 +14,10 @@ import pytest
 from solidlsp import SolidLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_types import SymbolKind
-
-from . import EXPERT_UNAVAILABLE, EXPERT_UNAVAILABLE_REASON
+from test.conftest import language_tests_enabled
 
 # These marks will be applied to all tests in this module
-pytestmark = [pytest.mark.elixir, pytest.mark.skipif(EXPERT_UNAVAILABLE, reason=f"Next LS not available: {EXPERT_UNAVAILABLE_REASON}")]
+pytestmark = [pytest.mark.elixir, pytest.mark.skipif(not language_tests_enabled(Language.ELIXIR), reason="Elixir tests are disabled")]
 
 
 class TestElixirLanguageServerSymbols:
@@ -53,7 +52,7 @@ class TestElixirLanguageServerSymbols:
             assert containing_symbol["name"] == "def create_user(pid, id, name, email, roles \\\\ [])"
             assert containing_symbol["kind"] == SymbolKind.Method or containing_symbol["kind"] == SymbolKind.Function
             if "body" in containing_symbol:
-                assert "def create_user" in containing_symbol["body"]
+                assert "def create_user" in containing_symbol["body"].get_text()
 
     @pytest.mark.parametrize("language_server", [Language.ELIXIR], indirect=True)
     def test_request_containing_symbol_module(self, language_server: SolidLanguageServer) -> None:
